@@ -5,12 +5,13 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from backend.retriever import getRelevantContext
 
 load_dotenv()
 
 MODEL = "gpt-4o-mini"
 
-# Base instructions for each node — context and session history are prepended at runtime.
+# Base instructions for each node — context, session history, and RAG knowledge are prepended at runtime.
 GENERATOR_PROMPT = (
     "You are an expert Ubuntu bash command generator. "
     "Convert the user's natural language query into a single, raw, executable bash command "
@@ -41,6 +42,7 @@ VALIDATOR_PROMPT = (
 class AgentState(TypedDict):
     query: str            # Original user input — immutable throughout the graph.
     context: dict         # Terminal environment snapshot: pwd and shell.
+    knowledgeBase: str    # RAG context retrieved from the local Chroma knowledge base.
     command: str          # Bash command produced by generatorNode.
     isValid: bool         # Safety verdict from validatorNode.
     rejectionReason: str  # Populated on rejection; empty string otherwise.
@@ -74,14 +76,26 @@ def buildContextHeader(context: dict, pastCommands: list) -> str:
     return header + "\n"
 
 
+def retrievalNode(state: AgentState) -> dict:
+    """Queries the local ChromaDB knowledge base to enrich the generator's context."""
+    relevantContext = getRelevantContext(state["query"])
+    return {"knowledgeBase": relevantContext}
+
+
 def generatorNode(state: AgentState) -> dict:
     """Calls the LLM to convert the natural language query into a raw bash command."""
     client = buildClient()
     contextHeader = buildContextHeader(state["context"], state.get("pastCommands", []))
+
+    systemContent = contextHeader + GENERATOR_PROMPT
+    # Inject RAG knowledge only when the retrieval node found relevant content.
+    if state.get("knowledgeBase"):
+        systemContent += f"\n\nProprietary Local Knowledge:\n{state['knowledgeBase']}"
+
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": contextHeader + GENERATOR_PROMPT},
+            {"role": "system", "content": systemContent},
             {"role": "user", "content": state["query"]},
         ],
         temperature=0,    # Deterministic output — commands must not vary between calls.
@@ -121,11 +135,13 @@ _memory = MemorySaver()
 
 
 def _buildGraph():
-    """Compiles the LangGraph state machine: generatorNode -> validatorNode."""
+    """Compiles the LangGraph state machine: retrievalNode -> generatorNode -> validatorNode."""
     graph = StateGraph(AgentState)
+    graph.add_node("retrievalNode", retrievalNode)
     graph.add_node("generatorNode", generatorNode)
     graph.add_node("validatorNode", validatorNode)
-    graph.set_entry_point("generatorNode")
+    graph.set_entry_point("retrievalNode")
+    graph.add_edge("retrievalNode", "generatorNode")
     graph.add_edge("generatorNode", "validatorNode")
     graph.add_edge("validatorNode", END)
     return graph.compile(checkpointer=_memory)
@@ -138,7 +154,7 @@ _graph = _buildGraph()
 def generateCommand(query: str, context: dict, threadId: str) -> str:
     """
     Public entry point. Runs the query and terminal context through the
-    Generator -> Validator state machine and returns the validated bash command.
+    Retrieval -> Generator -> Validator state machine and returns the validated bash command.
 
     threadId scopes the MemorySaver checkpoint so each terminal session maintains
     its own independent command history.
@@ -148,6 +164,7 @@ def generateCommand(query: str, context: dict, threadId: str) -> str:
     initialState: AgentState = {
         "query": query,
         "context": context,
+        "knowledgeBase": "",
         "command": "",
         "isValid": False,
         "rejectionReason": "",
