@@ -1,0 +1,9 @@
+services:
+  backend-daemon:
+    build: .
+    container_name: zsh-copilot-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: always
