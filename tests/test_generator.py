@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 from backend.generator import generateCommand
 
 MOCK_CONTEXT = {"pwd": "/test/dir", "shell": "bash"}
+MOCK_THREAD_ID = "test-thread"
 
 
 def buildMockResponse(text: str) -> MagicMock:
@@ -35,7 +36,7 @@ def test_generateCommand_returnsExpectedCommand(mockBuildClient):
     generatorClient, validatorClient = buildClientPair("ls -la /home")
     mockBuildClient.side_effect = [generatorClient, validatorClient]
 
-    result = generateCommand("list all files in home directory", MOCK_CONTEXT)
+    result = generateCommand("list all files in home directory", MOCK_CONTEXT, MOCK_THREAD_ID)
 
     assert result == "ls -la /home"
 
@@ -46,7 +47,7 @@ def test_generateCommand_stripsWhitespace(mockBuildClient):
     generatorClient, validatorClient = buildClientPair("  df -h  ")
     mockBuildClient.side_effect = [generatorClient, validatorClient]
 
-    result = generateCommand("show disk usage", MOCK_CONTEXT)
+    result = generateCommand("show disk usage", MOCK_CONTEXT, MOCK_THREAD_ID)
 
     assert result == "df -h"
 
@@ -57,7 +58,7 @@ def test_generateCommand_passesQueryToModel(mockBuildClient):
     generatorClient, validatorClient = buildClientPair("uptime")
     mockBuildClient.side_effect = [generatorClient, validatorClient]
 
-    generateCommand("show system uptime", MOCK_CONTEXT)
+    generateCommand("show system uptime", MOCK_CONTEXT, MOCK_THREAD_ID)
 
     # Assert against the generator client — the validator receives the command, not the query.
     callArgs = generatorClient.chat.completions.create.call_args

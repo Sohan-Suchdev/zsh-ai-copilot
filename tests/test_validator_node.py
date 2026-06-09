@@ -15,21 +15,29 @@ def buildMockResponse(text: str) -> MagicMock:
     return mockResponse
 
 
-def buildState(command: str, query: str = "test query") -> dict:
+def buildState(command: str, query: str = "test query", pastCommands: list = None) -> dict:
     """Return a fully-populated AgentState dict with the standard mock context."""
-    return {"query": query, "context": MOCK_CONTEXT, "command": command, "isValid": False, "rejectionReason": ""}
+    return {
+        "query": query,
+        "context": MOCK_CONTEXT,
+        "command": command,
+        "isValid": False,
+        "rejectionReason": "",
+        "pastCommands": pastCommands if pastCommands is not None else [],
+    }
 
 
 @patch("backend.generator.buildClient")
 def test_validatorNode_safeCommandSetsIsValidTrue(mockBuildClient):
-    """Verify that a SAFE verdict sets isValid to True and clears rejectionReason."""
+    """Verify that a SAFE verdict sets isValid to True and appends the command to pastCommands."""
     mockClient = MagicMock()
     mockClient.chat.completions.create.return_value = buildMockResponse("SAFE")
     mockBuildClient.return_value = mockClient
 
     result = validatorNode(buildState("ls -la"))
 
-    assert result == {"isValid": True, "rejectionReason": ""}
+    # On SAFE, the node appends a Q/A pair so the generator can resolve pronouns across turns.
+    assert result == {"isValid": True, "rejectionReason": "", "pastCommands": ["User: test query -> AI: ls -la"]}
 
 
 @patch("backend.generator.buildClient")

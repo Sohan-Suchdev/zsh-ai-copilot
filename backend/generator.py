@@ -1,14 +1,16 @@
 import os
-from typing import TypedDict
+import operator
+from typing import Annotated, TypedDict
 from openai import OpenAI
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 
 load_dotenv()
 
 MODEL = "gpt-4o-mini"
 
-# Base instructions for each node — context is prepended at runtime via buildContextHeader.
+# Base instructions for each node — context and session history are prepended at runtime.
 GENERATOR_PROMPT = (
     "You are an expert Ubuntu bash command generator. "
     "Convert the user's natural language query into a single, raw, executable bash command "
@@ -30,6 +32,9 @@ class AgentState(TypedDict):
     command: str          # Bash command produced by generatorNode.
     isValid: bool         # Safety verdict from validatorNode.
     rejectionReason: str  # Populated on rejection; empty string otherwise.
+    # operator.add reducer appends new entries rather than replacing the list,
+    # so MemorySaver accumulates validated commands across invocations of the same thread.
+    pastCommands: Annotated[list, operator.add]
 
 
 def buildClient() -> OpenAI:
@@ -40,21 +45,27 @@ def buildClient() -> OpenAI:
     return OpenAI(api_key=apiKey)
 
 
-def buildContextHeader(context: dict) -> str:
-    """Formats the terminal environment snapshot into a preamble for system prompts."""
+def buildContextHeader(context: dict, pastCommands: list) -> str:
+    """Formats the terminal environment and session history into a preamble for system prompts."""
     pwdValue = context.get("pwd", "unknown")
     shellValue = context.get("shell", "unknown")
-    return (
+    header = (
         f"User's current environment:\n"
         f"- Working directory: {pwdValue}\n"
-        f"- Shell: {shellValue}\n\n"
+        f"- Shell: {shellValue}\n"
     )
+    if pastCommands:
+        # Limit to the 5 most recent turns to keep the prompt concise.
+        recentTurns = pastCommands[-5:]
+        historyLines = "\n".join(f"  - {turn}" for turn in recentTurns)
+        header += f"- Recent session history:\n{historyLines}\n"
+    return header + "\n"
 
 
 def generatorNode(state: AgentState) -> dict:
     """Calls the LLM to convert the natural language query into a raw bash command."""
     client = buildClient()
-    contextHeader = buildContextHeader(state["context"])
+    contextHeader = buildContextHeader(state["context"], state.get("pastCommands", []))
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -71,7 +82,7 @@ def generatorNode(state: AgentState) -> dict:
 def validatorNode(state: AgentState) -> dict:
     """Audits the generated command for safety and validity given the user's environment."""
     client = buildClient()
-    contextHeader = buildContextHeader(state["context"])
+    contextHeader = buildContextHeader(state["context"], state.get("pastCommands", []))
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -84,11 +95,17 @@ def validatorNode(state: AgentState) -> dict:
     verdict = response.choices[0].message.content.strip()
 
     if verdict == "SAFE":
-        return {"isValid": True, "rejectionReason": ""}
+        # Store as a Q/A pair so the generator can resolve pronouns across turns.
+        historyEntry = f"User: {state['query']} -> AI: {state['command']}"
+        return {"isValid": True, "rejectionReason": "", "pastCommands": [historyEntry]}
 
     # Strip the "UNSAFE:" prefix to isolate the human-readable reason.
     reason = verdict.removeprefix("UNSAFE:").strip()
     return {"isValid": False, "rejectionReason": reason}
+
+
+# In-memory checkpointer — persists state across invocations sharing the same thread_id.
+_memory = MemorySaver()
 
 
 def _buildGraph():
@@ -99,17 +116,20 @@ def _buildGraph():
     graph.set_entry_point("generatorNode")
     graph.add_edge("generatorNode", "validatorNode")
     graph.add_edge("validatorNode", END)
-    return graph.compile()
+    return graph.compile(checkpointer=_memory)
 
 
 # Compiled once at module load and reused on every generateCommand call.
 _graph = _buildGraph()
 
 
-def generateCommand(query: str, context: dict) -> str:
+def generateCommand(query: str, context: dict, threadId: str) -> str:
     """
     Public entry point. Runs the query and terminal context through the
     Generator -> Validator state machine and returns the validated bash command.
+
+    threadId scopes the MemorySaver checkpoint so each terminal session maintains
+    its own independent command history.
 
     Raises ValueError if the validator rejects the generated command.
     """
@@ -119,8 +139,12 @@ def generateCommand(query: str, context: dict) -> str:
         "command": "",
         "isValid": False,
         "rejectionReason": "",
+        "pastCommands": [],    # Empty list + operator.add leaves existing history intact.
     }
-    finalState = _graph.invoke(initialState)
+    finalState = _graph.invoke(
+        initialState,
+        config={"configurable": {"thread_id": threadId}},
+    )
 
     if not finalState["isValid"]:
         raise ValueError(f"Command rejected by validator: {finalState['rejectionReason']}")

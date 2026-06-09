@@ -15,9 +15,16 @@ def buildMockResponse(text: str) -> MagicMock:
     return mockResponse
 
 
-def buildState(query: str = "list all files", command: str = "") -> dict:
+def buildState(query: str = "list all files", command: str = "", pastCommands: list = None) -> dict:
     """Return a fully-populated AgentState dict with the standard mock context."""
-    return {"query": query, "context": MOCK_CONTEXT, "command": command, "isValid": False, "rejectionReason": ""}
+    return {
+        "query": query,
+        "context": MOCK_CONTEXT,
+        "command": command,
+        "isValid": False,
+        "rejectionReason": "",
+        "pastCommands": pastCommands if pastCommands is not None else [],
+    }
 
 
 @patch("backend.generator.buildClient")
@@ -89,3 +96,23 @@ def test_generatorNode_injectsContextIntoSystemMessage(mockBuildClient):
     systemMessage = next(m for m in messages if m["role"] == "system")
     assert "/test/dir" in systemMessage["content"]
     assert "bash" in systemMessage["content"]
+
+
+@patch("backend.generator.buildClient")
+def test_generatorNode_injectsPastCommandsIntoSystemMessage(mockBuildClient):
+    """Verify that prior session commands from state are injected into the system message."""
+    mockClient = MagicMock()
+    mockClient.chat.completions.create.return_value = buildMockResponse("ls -la")
+    mockBuildClient.return_value = mockClient
+
+    mockHistory = [
+        "User: show disk usage -> AI: df -h",
+        "User: show system uptime -> AI: uptime",
+    ]
+    generatorNode(buildState("list files", pastCommands=mockHistory))
+
+    callArgs = mockClient.chat.completions.create.call_args
+    messages = callArgs.kwargs["messages"]
+    systemMessage = next(m for m in messages if m["role"] == "system")
+    assert "User: show disk usage -> AI: df -h" in systemMessage["content"]
+    assert "User: show system uptime -> AI: uptime" in systemMessage["content"]
