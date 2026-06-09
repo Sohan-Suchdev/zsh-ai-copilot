@@ -1,5 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from backend.generator import generateCommand
 
 app = FastAPI()
 
@@ -9,5 +10,7 @@ class QueryRequest(BaseModel):
 
 
 @app.post("/query")
-def handle_query(request: QueryRequest):
-    return {"command": "echo 'AI Copilot is alive!'"}
+def handleQuery(request: QueryRequest):
+    """Accepts a natural language query and returns a generated bash command."""
+    generatedCommand = generateCommand(request.query)
+    return {"command": generatedCommand}
