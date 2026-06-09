@@ -20,7 +20,11 @@ def buildState(command: str, query: str = "test query", pastCommands: list = Non
     return {
         "query": query,
         "context": MOCK_CONTEXT,
+        "knowledgeBase": "",
+        "osInfo": "",
+        "isQuestion": False,
         "command": command,
+        "response": "",
         "isValid": False,
         "rejectionReason": "",
         "pastCommands": pastCommands if pastCommands is not None else [],

@@ -2,12 +2,53 @@
 
 BACKEND_URL="http://127.0.0.1:8000"
 
+# Resolve the project root from this script's absolute path at source time.
+# ai.zsh lives at <project>/shell/ai.zsh, so two :h modifiers reach the project root.
+if [[ -n "$ZSH_VERSION" ]]; then
+    _AI_COPILOT_DIR="${0:A:h:h}"
+else
+    _AI_COPILOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+
 # Generate a unique session identifier once per terminal session.
 # Tries nanosecond timestamp first (Linux), then uuidgen (macOS), then PID as fallback.
 if [[ -z "$AI_COPILOT_THREAD_ID" ]]; then
     AI_COPILOT_THREAD_ID=$(date +%s%N 2>/dev/null || uuidgen 2>/dev/null || echo $$)
     export AI_COPILOT_THREAD_ID
 fi
+
+# Returns 0 if port 8000 is accepting connections, 1 otherwise.
+# Prefers nc for speed; falls back to a silent curl probe where nc is absent.
+function _isPortOpen() {
+    if command -v nc &>/dev/null; then
+        nc -z 127.0.0.1 8000 2>/dev/null
+    else
+        curl --silent --max-time 1 --output /dev/null "${BACKEND_URL}/docs" 2>/dev/null
+    fi
+}
+
+# Starts the Uvicorn server in the background if it is not already running,
+# then polls until the port is open (up to 10 seconds).
+function _ensureBackendRunning() {
+    _isPortOpen && return 0
+
+    echo "Starting AI Copilot backend..." >&2
+    (cd "${_AI_COPILOT_DIR}" && \
+        nohup "${_AI_COPILOT_DIR}/venv/bin/uvicorn" backend.main:app \
+            --host 127.0.0.1 --port 8000 \
+            >> "${_AI_COPILOT_DIR}/uvicorn.log" 2>&1 &)
+
+    local attempt=0
+    until _isPortOpen; do
+        attempt=$((attempt + 1))
+        if [[ $attempt -ge 10 ]]; then
+            echo "Error: backend failed to start within 10 seconds." >&2
+            echo "Check ${_AI_COPILOT_DIR}/uvicorn.log for details." >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
 
 # Sends a single query to the backend and prints the result (command or explanation) to stdout.
 # Returns 1 and prints an error to stderr if the backend request fails.
@@ -64,6 +105,9 @@ function ai() {
         echo "Usage: ai <your natural language query>" >&2
         return 1
     fi
+
+    # Auto-boot the backend daemon if it is not already running.
+    _ensureBackendRunning || return 1
 
     # Resolve the shell identifier — prefer a version string for richer context.
     local shellVersion
@@ -154,6 +198,7 @@ function ai() {
         local debugQuery
         debugQuery="The last command '${suggestedCommand}' failed with exit code ${exitCode}. Error output: ${stderrContent}. Please write a corrected command."
 
+        # Debug queries are never questions — always route to the command generator.
         suggestedCommand=$(_fetchCommand "$debugQuery" "$shellVersion" "$osInfo" "false") || return 1
         # Loop: present the corrected command with the standard [Y/n/e] prompt.
     done

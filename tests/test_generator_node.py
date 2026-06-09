@@ -20,7 +20,11 @@ def buildState(query: str = "list all files", command: str = "", pastCommands: l
     return {
         "query": query,
         "context": MOCK_CONTEXT,
+        "knowledgeBase": "",
+        "osInfo": "",
+        "isQuestion": False,
         "command": command,
+        "response": "",
         "isValid": False,
         "rejectionReason": "",
         "pastCommands": pastCommands if pastCommands is not None else [],
@@ -99,6 +103,23 @@ def test_generatorNode_injectsContextIntoSystemMessage(mockBuildClient):
 
 
 @patch("backend.generator.buildClient")
+def test_generatorNode_injectsOsInfoIntoSystemMessage(mockBuildClient):
+    """Verify that a non-empty osInfo string appears in the system message."""
+    mockClient = MagicMock()
+    mockClient.chat.completions.create.return_value = buildMockResponse("uname -a")
+    mockBuildClient.return_value = mockClient
+
+    state = buildState("show os version")
+    state["osInfo"] = "Linux 5.15.0 x86_64 / Ubuntu 22.04.3 LTS"
+    generatorNode(state)
+
+    callArgs = mockClient.chat.completions.create.call_args
+    messages = callArgs.kwargs["messages"]
+    systemMessage = next(m for m in messages if m["role"] == "system")
+    assert "Linux 5.15.0 x86_64 / Ubuntu 22.04.3 LTS" in systemMessage["content"]
+
+
+@patch("backend.generator.buildClient")
 def test_generatorNode_injectsPastCommandsIntoSystemMessage(mockBuildClient):
     """Verify that prior session commands from state are injected into the system message."""
     mockClient = MagicMock()
@@ -116,3 +137,36 @@ def test_generatorNode_injectsPastCommandsIntoSystemMessage(mockBuildClient):
     systemMessage = next(m for m in messages if m["role"] == "system")
     assert "User: show disk usage -> AI: df -h" in systemMessage["content"]
     assert "User: show system uptime -> AI: uptime" in systemMessage["content"]
+
+
+@patch("backend.generator.buildClient")
+def test_generatorNode_injectsKnowledgeBaseIntoSystemMessage(mockBuildClient):
+    """Verify that a non-empty knowledgeBase is injected into the system message."""
+    mockClient = MagicMock()
+    mockClient.chat.completions.create.return_value = buildMockResponse("ll")
+    mockBuildClient.return_value = mockClient
+
+    stateWithKnowledge = buildState("list files")
+    stateWithKnowledge["knowledgeBase"] = "Custom alias: ll means ls -la --color=auto"
+
+    generatorNode(stateWithKnowledge)
+
+    callArgs = mockClient.chat.completions.create.call_args
+    messages = callArgs.kwargs["messages"]
+    systemMessage = next(m for m in messages if m["role"] == "system")
+    assert "Custom alias: ll means ls -la --color=auto" in systemMessage["content"]
+
+
+@patch("backend.generator.buildClient")
+def test_generatorNode_omitsKnowledgeBaseSectionWhenEmpty(mockBuildClient):
+    """Verify that an empty knowledgeBase does not add the RAG section to the system message."""
+    mockClient = MagicMock()
+    mockClient.chat.completions.create.return_value = buildMockResponse("ls")
+    mockBuildClient.return_value = mockClient
+
+    generatorNode(buildState("list files"))
+
+    callArgs = mockClient.chat.completions.create.call_args
+    messages = callArgs.kwargs["messages"]
+    systemMessage = next(m for m in messages if m["role"] == "system")
+    assert "Proprietary Local Knowledge" not in systemMessage["content"]

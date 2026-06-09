@@ -2,3 +2,6 @@ venv/
 .env
 __pycache__/
 *.pyc
+db/
+uvicorn.log
+AI_INSTRUCTIONS.md
