@@ -28,6 +28,7 @@ httpx==0.28.1
 huggingface_hub==1.18.0
 idna==3.18
 importlib_resources==7.1.0
+iniconfig==2.3.0
 jiter==0.15.0
 jsonpatch==1.33
 jsonpointer==3.1.1
@@ -61,6 +62,7 @@ orjson==3.11.9
 ormsgpack==1.12.2
 overrides==7.7.0
 packaging==26.2
+pluggy==1.6.0
 propcache==0.5.2
 protobuf==6.33.6
 pybase64==1.4.3
@@ -71,6 +73,7 @@ Pygments==2.20.0
 pypdf==6.13.1
 PyPika==0.51.1
 pyproject_hooks==1.2.0
+pytest==9.0.3
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 PyYAML==6.0.3
