@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock, patch
 from backend.generator import validatorNode, VALIDATOR_PROMPT
 
+MOCK_CONTEXT = {"pwd": "/test/dir", "shell": "bash"}
+
 
 def buildMockResponse(text: str) -> MagicMock:
     """Construct a mock mirroring the shape of an OpenAI chat completion response."""
@@ -13,6 +15,11 @@ def buildMockResponse(text: str) -> MagicMock:
     return mockResponse
 
 
+def buildState(command: str, query: str = "test query") -> dict:
+    """Return a fully-populated AgentState dict with the standard mock context."""
+    return {"query": query, "context": MOCK_CONTEXT, "command": command, "isValid": False, "rejectionReason": ""}
+
+
 @patch("backend.generator.buildClient")
 def test_validatorNode_safeCommandSetsIsValidTrue(mockBuildClient):
     """Verify that a SAFE verdict sets isValid to True and clears rejectionReason."""
@@ -20,7 +27,7 @@ def test_validatorNode_safeCommandSetsIsValidTrue(mockBuildClient):
     mockClient.chat.completions.create.return_value = buildMockResponse("SAFE")
     mockBuildClient.return_value = mockClient
 
-    result = validatorNode({"query": "list files", "command": "ls -la", "isValid": False, "rejectionReason": ""})
+    result = validatorNode(buildState("ls -la"))
 
     assert result == {"isValid": True, "rejectionReason": ""}
 
@@ -32,24 +39,25 @@ def test_validatorNode_unsafeCommandSetsIsValidFalse(mockBuildClient):
     mockClient.chat.completions.create.return_value = buildMockResponse("UNSAFE: Deletes the entire filesystem.")
     mockBuildClient.return_value = mockClient
 
-    result = validatorNode({"query": "nuke everything", "command": "rm -rf /", "isValid": False, "rejectionReason": ""})
+    result = validatorNode(buildState("rm -rf /", query="nuke everything"))
 
     assert result == {"isValid": False, "rejectionReason": "Deletes the entire filesystem."}
 
 
 @patch("backend.generator.buildClient")
 def test_validatorNode_usesCorrectSystemPrompt(mockBuildClient):
-    """Verify the node sends VALIDATOR_PROMPT as the system message, not the generator prompt."""
+    """Verify the node's system message contains VALIDATOR_PROMPT (after the context header)."""
     mockClient = MagicMock()
     mockClient.chat.completions.create.return_value = buildMockResponse("SAFE")
     mockBuildClient.return_value = mockClient
 
-    validatorNode({"query": "list files", "command": "ls -la", "isValid": False, "rejectionReason": ""})
+    validatorNode(buildState("ls -la"))
 
     callArgs = mockClient.chat.completions.create.call_args
     messages = callArgs.kwargs["messages"]
     systemMessage = next(m for m in messages if m["role"] == "system")
-    assert systemMessage["content"] == VALIDATOR_PROMPT
+    # The system message is contextHeader + VALIDATOR_PROMPT; check containment not equality.
+    assert VALIDATOR_PROMPT in systemMessage["content"]
 
 
 @patch("backend.generator.buildClient")
@@ -59,9 +67,25 @@ def test_validatorNode_forwardsCommandAsUserMessage(mockBuildClient):
     mockClient.chat.completions.create.return_value = buildMockResponse("SAFE")
     mockBuildClient.return_value = mockClient
 
-    validatorNode({"query": "show disk usage", "command": "df -h", "isValid": False, "rejectionReason": ""})
+    validatorNode(buildState("df -h", query="show disk usage"))
 
     callArgs = mockClient.chat.completions.create.call_args
     messages = callArgs.kwargs["messages"]
     userMessage = next(m for m in messages if m["role"] == "user")
     assert userMessage["content"] == "df -h"
+
+
+@patch("backend.generator.buildClient")
+def test_validatorNode_injectsContextIntoSystemMessage(mockBuildClient):
+    """Verify that the pwd and shell from context appear in the system message."""
+    mockClient = MagicMock()
+    mockClient.chat.completions.create.return_value = buildMockResponse("SAFE")
+    mockBuildClient.return_value = mockClient
+
+    validatorNode(buildState("ls -la"))
+
+    callArgs = mockClient.chat.completions.create.call_args
+    messages = callArgs.kwargs["messages"]
+    systemMessage = next(m for m in messages if m["role"] == "system")
+    assert "/test/dir" in systemMessage["content"]
+    assert "bash" in systemMessage["content"]

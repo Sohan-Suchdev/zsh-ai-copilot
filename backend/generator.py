@@ -8,16 +8,17 @@ load_dotenv()
 
 MODEL = "gpt-4o-mini"
 
-# Constrains the generator strictly to raw bash output — no prose, no markdown.
+# Base instructions for each node — context is prepended at runtime via buildContextHeader.
 GENERATOR_PROMPT = (
     "You are an expert Ubuntu bash command generator. "
-    "Convert the user's natural language query into a single, raw, executable bash command. "
+    "Convert the user's natural language query into a single, raw, executable bash command "
+    "that is correct for their current environment. "
     "Output ONLY the command itself — no explanation, no markdown, no code fences."
 )
 
-# Constrains the validator to a strict two-option verdict format for reliable parsing.
 VALIDATOR_PROMPT = (
     "You are a strict Ubuntu bash security auditor. "
+    "Evaluate the given bash command in the context of the user's current environment. "
     "If the command is safe and valid Ubuntu bash, respond with exactly: SAFE\n"
     "If the command is unsafe or invalid, respond with exactly: UNSAFE: <brief reason>"
 )
@@ -25,6 +26,7 @@ VALIDATOR_PROMPT = (
 
 class AgentState(TypedDict):
     query: str            # Original user input — immutable throughout the graph.
+    context: dict         # Terminal environment snapshot: pwd and shell.
     command: str          # Bash command produced by generatorNode.
     isValid: bool         # Safety verdict from validatorNode.
     rejectionReason: str  # Populated on rejection; empty string otherwise.
@@ -38,13 +40,25 @@ def buildClient() -> OpenAI:
     return OpenAI(api_key=apiKey)
 
 
+def buildContextHeader(context: dict) -> str:
+    """Formats the terminal environment snapshot into a preamble for system prompts."""
+    pwdValue = context.get("pwd", "unknown")
+    shellValue = context.get("shell", "unknown")
+    return (
+        f"User's current environment:\n"
+        f"- Working directory: {pwdValue}\n"
+        f"- Shell: {shellValue}\n\n"
+    )
+
+
 def generatorNode(state: AgentState) -> dict:
     """Calls the LLM to convert the natural language query into a raw bash command."""
     client = buildClient()
+    contextHeader = buildContextHeader(state["context"])
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": GENERATOR_PROMPT},
+            {"role": "system", "content": contextHeader + GENERATOR_PROMPT},
             {"role": "user", "content": state["query"]},
         ],
         temperature=0,    # Deterministic output — commands must not vary between calls.
@@ -55,12 +69,13 @@ def generatorNode(state: AgentState) -> dict:
 
 
 def validatorNode(state: AgentState) -> dict:
-    """Audits the generated command for safety and validity on Ubuntu."""
+    """Audits the generated command for safety and validity given the user's environment."""
     client = buildClient()
+    contextHeader = buildContextHeader(state["context"])
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": VALIDATOR_PROMPT},
+            {"role": "system", "content": contextHeader + VALIDATOR_PROMPT},
             {"role": "user", "content": state["command"]},
         ],
         temperature=0,
@@ -91,16 +106,16 @@ def _buildGraph():
 _graph = _buildGraph()
 
 
-def generateCommand(query: str) -> str:
+def generateCommand(query: str, context: dict) -> str:
     """
-    Public entry point. Runs the query through the Generator -> Validator state machine
-    and returns the validated bash command string.
+    Public entry point. Runs the query and terminal context through the
+    Generator -> Validator state machine and returns the validated bash command.
 
     Raises ValueError if the validator rejects the generated command.
-    Backwards-compatible with the /query endpoint in main.py.
     """
     initialState: AgentState = {
         "query": query,
+        "context": context,
         "command": "",
         "isValid": False,
         "rejectionReason": "",

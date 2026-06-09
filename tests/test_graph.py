@@ -2,6 +2,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 from backend.generator import generateCommand
 
+MOCK_CONTEXT = {"pwd": "/test/dir", "shell": "bash"}
+
 
 def buildMockResponse(text: str) -> MagicMock:
     """Construct a mock mirroring the shape of an OpenAI chat completion response."""
@@ -26,7 +28,7 @@ def test_fullGraph_returnsCommandWhenValidatorApproves(mockBuildClient):
     # side_effect supplies a different client per call: first to generatorNode, second to validatorNode.
     mockBuildClient.side_effect = [generatorClient, validatorClient]
 
-    result = generateCommand("list all files")
+    result = generateCommand("list all files", MOCK_CONTEXT)
 
     assert result == "ls -la"
 
@@ -43,7 +45,7 @@ def test_fullGraph_raisesValueErrorWhenValidatorRejects(mockBuildClient):
     mockBuildClient.side_effect = [generatorClient, validatorClient]
 
     with pytest.raises(ValueError, match="Deletes the entire filesystem."):
-        generateCommand("delete everything")
+        generateCommand("delete everything", MOCK_CONTEXT)
 
 
 @patch("backend.generator.buildClient")
@@ -57,7 +59,7 @@ def test_fullGraph_generatorOutputIsPassedToValidator(mockBuildClient):
 
     mockBuildClient.side_effect = [generatorClient, validatorClient]
 
-    generateCommand("show size of each item in current directory")
+    generateCommand("show size of each item in current directory", MOCK_CONTEXT)
 
     validatorCallArgs = validatorClient.chat.completions.create.call_args
     messages = validatorCallArgs.kwargs["messages"]

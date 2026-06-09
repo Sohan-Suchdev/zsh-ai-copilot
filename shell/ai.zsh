@@ -2,8 +2,8 @@
 
 BACKEND_URL="http://127.0.0.1:8000"
 
-# Sends a natural language query to the backend, prints the validated command,
-# and prompts the user to confirm before executing it.
+# Sends a natural language query and terminal context to the backend, prints the
+# validated command, and prompts the user to confirm before executing it.
 # Usage: ai "list all running docker containers"
 function ai() {
     local queryText="$*"
@@ -14,9 +14,29 @@ function ai() {
         return 1
     fi
 
-    # Safely encode the query into valid JSON using Python to prevent injection/escaping errors.
+    # Resolve the shell identifier — prefer a version string for richer context.
+    local shellVersion
+    if [[ -n "$ZSH_VERSION" ]]; then
+        shellVersion="zsh ${ZSH_VERSION}"
+    elif [[ -n "$BASH_VERSION" ]]; then
+        shellVersion="bash ${BASH_VERSION}"
+    else
+        shellVersion="$(basename "$SHELL")"
+    fi
+
+    # Build the JSON payload via Python so all values are safely escaped.
+    # Query, pwd, and shell are passed as argv to avoid any injection risk.
     local jsonPayload
-    jsonPayload=$(python3 -c "import sys, json; print(json.dumps({'query': sys.argv[1]}))" "$queryText")
+    jsonPayload=$(python3 -c "
+import sys, json
+print(json.dumps({
+    'query': sys.argv[1],
+    'context': {
+        'pwd':   sys.argv[2],
+        'shell': sys.argv[3]
+    }
+}))
+" "$queryText" "$PWD" "$shellVersion")
 
     # POST to the backend; capture both the response body and the HTTP status code.
     local rawResponse
