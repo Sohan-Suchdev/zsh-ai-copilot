@@ -9,25 +9,27 @@ if [[ -z "$AI_COPILOT_THREAD_ID" ]]; then
     export AI_COPILOT_THREAD_ID
 fi
 
-# Sends a single query to the backend and prints the suggested command to stdout.
+# Sends a single query to the backend and prints the result (command or explanation) to stdout.
 # Returns 1 and prints an error to stderr if the backend request fails.
-# Usage: _fetchCommand "queryText" "shellVersion"
+# Usage: _fetchCommand "queryText" "shellVersion" "osInfo" "isQuestion"
 function _fetchCommand() {
     local queryText="$1"
     local shellVersion="$2"
+    local osInfo="$3"
+    local isQuestion="$4"
 
     local jsonPayload
     jsonPayload=$(python3 -c "
 import sys, json
+args = sys.argv
 print(json.dumps({
-    'query':    sys.argv[1],
-    'context': {
-        'pwd':   sys.argv[2],
-        'shell': sys.argv[3]
-    },
-    'threadId': sys.argv[4]
+    'query':      args[1],
+    'context':    {'pwd': args[2], 'shell': args[3]},
+    'threadId':   args[4],
+    'osInfo':     args[5],
+    'isQuestion': args[6].lower() == 'true',
 }))
-" "$queryText" "$PWD" "$shellVersion" "$AI_COPILOT_THREAD_ID")
+" "$queryText" "$PWD" "$shellVersion" "$AI_COPILOT_THREAD_ID" "$osInfo" "$isQuestion")
 
     local rawResponse
     rawResponse=$(curl --silent --write-out "\n%{http_code}" \
@@ -47,12 +49,12 @@ print(json.dumps({
         return 1
     fi
 
-    # Parse and print the 'command' field; Python is always available in WSL.
+    # Parse and print the 'command' field — holds either a bash command or explanatory text.
     echo "$responseBody" | python3 -c "import sys,json; print(json.load(sys.stdin)['command'])"
 }
 
-# Sends a natural language query to the backend, prints the validated command,
-# prompts for confirmation, and enters a self-correction loop on failure.
+# Sends a natural language query to the backend, prints the validated command or explanation,
+# prompts for confirmation ([Y/n/e]), and enters a self-correction loop on failure.
 # Usage: ai "list all running docker containers"
 function ai() {
     local queryText="$*"
@@ -73,9 +75,28 @@ function ai() {
         shellVersion="$(basename "$SHELL")"
     fi
 
-    # Fetch the initial command from the backend.
+    # Detect the OS and distro for richer generator context.
+    local osInfo
+    osInfo="$(uname -srm 2>/dev/null)"
+    if [[ -f /etc/os-release ]]; then
+        local distroName
+        distroName=$(grep -m1 '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '"')
+        [[ -n "$distroName" ]] && osInfo="${osInfo} / ${distroName}"
+    fi
+
+    # A trailing '?' routes the query to the explainer instead of the command generator.
+    local isQuestion="false"
+    [[ "$queryText" == *"?" ]] && isQuestion="true"
+
+    # Fetch the initial command or answer from the backend.
     local suggestedCommand
-    suggestedCommand=$(_fetchCommand "$queryText" "$shellVersion") || return 1
+    suggestedCommand=$(_fetchCommand "$queryText" "$shellVersion" "$osInfo" "$isQuestion") || return 1
+
+    # Questions return a natural language answer — display and exit without executing.
+    if [[ "$isQuestion" == "true" ]]; then
+        echo "$suggestedCommand"
+        return 0
+    fi
 
     # Execution and self-correction loop.
     # A while loop is used instead of recursion to avoid Zsh call-stack limits.
@@ -84,8 +105,18 @@ function ai() {
 
         # Read directly from /dev/tty so prompts work correctly inside pipelines.
         local userConfirmation
-        printf "Execute this command? [Y/n] " > /dev/tty
+        printf "Execute? [Y/n/e] " > /dev/tty
         read -r userConfirmation < /dev/tty
+
+        if [[ "$userConfirmation" == "e" || "$userConfirmation" == "E" ]]; then
+            # Inline edit before re-confirming — vared is Zsh-native; read -e -i is Bash readline.
+            if [[ -n "$ZSH_VERSION" ]]; then
+                vared suggestedCommand
+            else
+                read -e -i "$suggestedCommand" -p "Edit: " suggestedCommand < /dev/tty
+            fi
+            continue
+        fi
 
         if [[ "$userConfirmation" != "y" && "$userConfirmation" != "Y" && -n "$userConfirmation" ]]; then
             echo "Aborted."
@@ -123,7 +154,7 @@ function ai() {
         local debugQuery
         debugQuery="The last command '${suggestedCommand}' failed with exit code ${exitCode}. Error output: ${stderrContent}. Please write a corrected command."
 
-        suggestedCommand=$(_fetchCommand "$debugQuery" "$shellVersion") || return 1
-        # Loop: present the corrected command with the standard [Y/n] prompt.
+        suggestedCommand=$(_fetchCommand "$debugQuery" "$shellVersion" "$osInfo" "false") || return 1
+        # Loop: present the corrected command with the standard [Y/n/e] prompt.
     done
 }

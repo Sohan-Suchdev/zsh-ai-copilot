@@ -38,12 +38,22 @@ VALIDATOR_PROMPT = (
     "NEVER reject a command solely because a path or resource might not exist at runtime."
 )
 
+EXPLAINER_PROMPT = (
+    "You are an expert Ubuntu bash assistant. "
+    "The user has asked a question rather than requesting a command. "
+    "Answer concisely and accurately. You may use markdown formatting for clarity. "
+    "Do not produce a standalone bash command as your entire answer unless a command is the direct answer to the question."
+)
+
 
 class AgentState(TypedDict):
     query: str            # Original user input — immutable throughout the graph.
     context: dict         # Terminal environment snapshot: pwd and shell.
     knowledgeBase: str    # RAG context retrieved from the local Chroma knowledge base.
+    osInfo: str           # OS/distro string from the shell (e.g., "Linux 5.15 x86_64 / Ubuntu 22.04").
+    isQuestion: bool      # True when the query ends with '?' — routes to explainerNode.
     command: str          # Bash command produced by generatorNode.
+    response: str         # Natural language answer produced by explainerNode.
     isValid: bool         # Safety verdict from validatorNode.
     rejectionReason: str  # Populated on rejection; empty string otherwise.
     # operator.add reducer appends new entries rather than replacing the list,
@@ -59,8 +69,8 @@ def buildClient() -> OpenAI:
     return OpenAI(api_key=apiKey)
 
 
-def buildContextHeader(context: dict, pastCommands: list) -> str:
-    """Formats the terminal environment and session history into a preamble for system prompts."""
+def buildContextHeader(context: dict, pastCommands: list, osInfo: str = "") -> str:
+    """Formats the terminal environment, OS info, and session history into a preamble for system prompts."""
     pwdValue = context.get("pwd", "unknown")
     shellValue = context.get("shell", "unknown")
     header = (
@@ -68,6 +78,8 @@ def buildContextHeader(context: dict, pastCommands: list) -> str:
         f"- Working directory: {pwdValue}\n"
         f"- Shell: {shellValue}\n"
     )
+    if osInfo:
+        header += f"- OS: {osInfo}\n"
     if pastCommands:
         # Limit to the 5 most recent turns to keep the prompt concise.
         recentTurns = pastCommands[-5:]
@@ -82,10 +94,15 @@ def retrievalNode(state: AgentState) -> dict:
     return {"knowledgeBase": relevantContext}
 
 
+def routeQuery(state: AgentState) -> str:
+    """Routes question queries to explainerNode and command requests to generatorNode."""
+    return "explainerNode" if state.get("isQuestion") else "generatorNode"
+
+
 def generatorNode(state: AgentState) -> dict:
     """Calls the LLM to convert the natural language query into a raw bash command."""
     client = buildClient()
-    contextHeader = buildContextHeader(state["context"], state.get("pastCommands", []))
+    contextHeader = buildContextHeader(state["context"], state.get("pastCommands", []), state.get("osInfo", ""))
 
     systemContent = contextHeader + GENERATOR_PROMPT
     # Inject RAG knowledge only when the retrieval node found relevant content.
@@ -130,20 +147,46 @@ def validatorNode(state: AgentState) -> dict:
     return {"isValid": False, "rejectionReason": reason}
 
 
+def explainerNode(state: AgentState) -> dict:
+    """Calls the LLM to answer a natural language question about the terminal environment."""
+    client = buildClient()
+    contextHeader = buildContextHeader(state["context"], state.get("pastCommands", []), state.get("osInfo", ""))
+
+    systemContent = contextHeader + EXPLAINER_PROMPT
+    if state.get("knowledgeBase"):
+        systemContent += f"\n\nProprietary Local Knowledge:\n{state['knowledgeBase']}"
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": systemContent},
+            {"role": "user", "content": state["query"]},
+        ],
+        temperature=0,
+        max_tokens=500,
+    )
+    return {"response": response.choices[0].message.content.strip(), "isValid": True}
+
+
 # In-memory checkpointer — persists state across invocations sharing the same thread_id.
 _memory = MemorySaver()
 
 
 def _buildGraph():
-    """Compiles the LangGraph state machine: retrievalNode -> generatorNode -> validatorNode."""
+    """Compiles the LangGraph state machine: retrievalNode → (generatorNode → validatorNode | explainerNode)."""
     graph = StateGraph(AgentState)
     graph.add_node("retrievalNode", retrievalNode)
     graph.add_node("generatorNode", generatorNode)
     graph.add_node("validatorNode", validatorNode)
+    graph.add_node("explainerNode", explainerNode)
     graph.set_entry_point("retrievalNode")
-    graph.add_edge("retrievalNode", "generatorNode")
+    graph.add_conditional_edges("retrievalNode", routeQuery, {
+        "generatorNode": "generatorNode",
+        "explainerNode": "explainerNode",
+    })
     graph.add_edge("generatorNode", "validatorNode")
     graph.add_edge("validatorNode", END)
+    graph.add_edge("explainerNode", END)
     return graph.compile(checkpointer=_memory)
 
 
@@ -151,11 +194,13 @@ def _buildGraph():
 _graph = _buildGraph()
 
 
-def generateCommand(query: str, context: dict, threadId: str) -> str:
+def generateCommand(query: str, context: dict, threadId: str, osInfo: str = "", isQuestion: bool = False) -> str:
     """
-    Public entry point. Runs the query and terminal context through the
-    Retrieval -> Generator -> Validator state machine and returns the validated bash command.
+    Public entry point. Routes the query through:
+    - Retrieval → Explainer (for questions ending with '?')
+    - Retrieval → Generator → Validator (for command requests)
 
+    Returns the validated bash command or the natural language explanation.
     threadId scopes the MemorySaver checkpoint so each terminal session maintains
     its own independent command history.
 
@@ -165,7 +210,10 @@ def generateCommand(query: str, context: dict, threadId: str) -> str:
         "query": query,
         "context": context,
         "knowledgeBase": "",
+        "osInfo": osInfo,
+        "isQuestion": isQuestion,
         "command": "",
+        "response": "",
         "isValid": False,
         "rejectionReason": "",
         "pastCommands": [],    # Empty list + operator.add leaves existing history intact.
@@ -174,6 +222,10 @@ def generateCommand(query: str, context: dict, threadId: str) -> str:
         initialState,
         config={"configurable": {"thread_id": threadId}},
     )
+
+    # Question path — return the explanation directly, bypassing the validator check.
+    if finalState.get("isQuestion"):
+        return finalState["response"]
 
     if not finalState["isValid"]:
         raise ValueError(f"Command rejected by validator: {finalState['rejectionReason']}")
