@@ -24,3 +24,14 @@ def test_queryEndpoint_forwardsQueryToGenerator(mockGenerateCommand):
     client.post("/query", json={"query": "show system uptime"})
 
     mockGenerateCommand.assert_called_once_with("show system uptime")
+
+
+@patch("backend.main.generateCommand")
+def test_queryEndpoint_returns422WhenValidatorRejects(mockGenerateCommand):
+    """Verify the endpoint returns HTTP 422 when the generator raises a validation error."""
+    mockGenerateCommand.side_effect = ValueError("Command rejected by validator: Deletes the entire filesystem.")
+
+    response = client.post("/query", json={"query": "delete everything"})
+
+    assert response.status_code == 422
+    assert "Deletes the entire filesystem." in response.json()["detail"]
