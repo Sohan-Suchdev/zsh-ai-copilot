@@ -17,17 +17,15 @@ def _getEmbeddings() -> HuggingFaceEmbeddings:
 
 
 def _getVectorStore() -> Chroma:
-    """Returns the persistent Chroma vector store, creating the directory if needed."""
+    # Returns the persistent Chroma vector store, creating the directory if needed.
     os.makedirs(CHROMA_DB_DIR, exist_ok=True)
     return Chroma(persist_directory=CHROMA_DB_DIR, embedding_function=_getEmbeddings())
 
 
 def getRelevantContext(query: str) -> str:
-    """
-    Performs a similarity search against the local knowledge base.
-    Returns a concatenated string of the top matching chunks,
-    or an empty string if the store is empty or no results are found.
-    """
+    # Performs a similarity search against the local knowledge base.
+    # Returns a concatenated string of the top matching chunks,
+    # or an empty string if the store is empty or no results are found.
     try:
         vectorStore = _getVectorStore()
         results = vectorStore.similarity_search(query, k=TOP_K_RESULTS)
@@ -40,14 +38,11 @@ def getRelevantContext(query: str) -> str:
 
 
 def ingestDocuments() -> None:
-    """
-    Reads .txt and .md files from ~/.ai-copilot-knowledge/, splits them into
-    chunks, and persists them to the local Chroma vector store.
-    """
+    # Reads .txt and .md files from ~/.ai-copilot-knowledge/, splits them into
+    # chunks, and persists them to the local Chroma vector store.
     if not KNOWLEDGE_DIR.exists():
         print(f"Knowledge directory not found: {KNOWLEDGE_DIR}")
         return
-
     # Python's glob does not support bash-style brace expansion — use one loader per extension.
     documents = []
     for pattern in ("**/*.txt", "**/*.md"):
@@ -59,14 +54,11 @@ def ingestDocuments() -> None:
             silent_errors=True,
         )
         documents.extend(loader.load())
-
     if not documents:
         print("No .txt or .md documents found in knowledge directory.")
         return
-
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = splitter.split_documents(documents)
-
     vectorStore = _getVectorStore()
     vectorStore.add_documents(chunks)
     print(f"Ingested {len(chunks)} chunks from {len(documents)} document(s) into {CHROMA_DB_DIR}.")
