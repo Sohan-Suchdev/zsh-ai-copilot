@@ -2,7 +2,8 @@
 
 BACKEND_URL="http://127.0.0.1:8000"
 
-# Sends a natural language query to the backend and prints the returned shell command.
+# Sends a natural language query to the backend, prints the validated command,
+# and prompts the user to confirm before executing it.
 # Usage: ai "list all running docker containers"
 function ai() {
     local queryText="$*"
@@ -19,13 +20,13 @@ function ai() {
 
     # POST to the backend; capture both the response body and the HTTP status code.
     local rawResponse
-    local httpStatus
     rawResponse=$(curl --silent --write-out "\n%{http_code}" \
         --request POST \
         --header "Content-Type: application/json" \
         --data "$jsonPayload" \
         "${BACKEND_URL}/query")
 
+    local httpStatus
     httpStatus=$(echo "$rawResponse" | tail -n1)
     local responseBody
     responseBody=$(echo "$rawResponse" | head -n -1)
@@ -43,4 +44,17 @@ function ai() {
     suggestedCommand=$(echo "$responseBody" | python3 -c "import sys,json; print(json.load(sys.stdin)['command'])")
 
     echo "$suggestedCommand"
+
+    # Read directly from /dev/tty so the prompt works correctly even when the
+    # function is invoked inside a pipeline where stdin is not the terminal.
+    local userConfirmation
+    printf "Execute this command? [Y/n] " > /dev/tty
+    read -r userConfirmation < /dev/tty
+
+    if [[ "$userConfirmation" == "y" || "$userConfirmation" == "Y" || -z "$userConfirmation" ]]; then
+        eval "$suggestedCommand"
+    else
+        echo "Aborted."
+        return 0
+    fi
 }
